@@ -5,6 +5,66 @@ import path from "path";
 import process from "process";
 
 /**
+ * Interface for filesystem operations
+ */
+export interface FileSystem {
+  existsSync: (path: string) => Promise<boolean> | boolean;
+  mkdirSync: (path: string) => Promise<void> | void;
+  writeFileSync: (
+    path: string,
+    content: string | Uint8Array
+  ) => Promise<void> | void;
+  statSync: (
+    path: string
+  ) => Promise<{ isDirectory: () => boolean }> | { isDirectory: () => boolean };
+  copyFileSync: (source: string, dest: string) => Promise<void> | void;
+  unlinkSync: (path: string) => Promise<void> | void;
+  rmSync: (
+    path: string,
+    options: { recursive: boolean }
+  ) => Promise<void> | void;
+  renameSync: (oldPath: string, newPath: string) => Promise<void> | void;
+  readdirSync: (
+    path: string,
+    options: { withFileTypes: true }
+  ) => Promise<fs.Dirent[]> | fs.Dirent[];
+}
+
+/**
+ * Default filesystem adapter using Node's fs module
+ */
+const defaultFs: FileSystem = {
+  existsSync: (path: string) => fs.existsSync(path),
+  mkdirSync: (path: string) => {
+    fs.mkdirSync(path, { recursive: true });
+    return Promise.resolve();
+  },
+  writeFileSync: (path: string, content: string | Uint8Array) => {
+    fs.writeFileSync(path, content);
+    return Promise.resolve();
+  },
+  statSync: (path: string) => fs.statSync(path),
+  copyFileSync: (source: string, dest: string) => {
+    fs.copyFileSync(source, dest);
+    return Promise.resolve();
+  },
+  unlinkSync: (path: string) => {
+    fs.unlinkSync(path);
+    return Promise.resolve();
+  },
+  rmSync: (path: string, options: { recursive: boolean }) => {
+    fs.rmSync(path, options);
+    return Promise.resolve();
+  },
+  renameSync: (oldPath: string, newPath: string) => {
+    fs.renameSync(oldPath, newPath);
+    return Promise.resolve();
+  },
+  readdirSync: (path: string, options: { withFileTypes: true }) =>
+    fs.readdirSync(path, options),
+};
+
+/**
  * Represents the type of file operation to perform.
  * - file: Create an empty file
  * - directory: Create a directory
@@ -31,6 +91,16 @@ interface FileOperation {
 interface CreateOptions {
   /** Whether to output verbose logs */
   verbose?: boolean;
+  /** Custom filesystem adapter */
+  fs?: FileSystem;
+  /** Search string for replacement */
+  search?: string;
+  /** Replace string for replacement */
+  replace?: string;
+  /** Whether to replace file names */
+  replaceFileNames?: boolean;
+  /** Whether to replace folder names */
+  replaceFolderNames?: boolean;
 }
 
 /**
@@ -45,20 +115,27 @@ interface CreateOptions {
  * @param rootDir The root directory to create the structure in
  * @param options Additional options for structure creation
  */
-export function createStructureFromString(
+export async function createStructureFromString(
   input: string,
   rootDir: string,
   options: CreateOptions = {}
-): void {
-  const { verbose = false } = options;
+): Promise<void> {
+  const {
+    verbose = false,
+    fs: customFs = defaultFs,
+    search = "",
+    replace = "",
+    replaceFileNames = false,
+    replaceFolderNames = false,
+  } = options;
 
   if (verbose) {
     console.log(chalk.blue(`📁 Creating structure in ${rootDir}`));
   }
 
   // Create the root directory if it doesn't exist
-  if (!fs.existsSync(rootDir)) {
-    fs.mkdirSync(rootDir, { recursive: true });
+  if (!(await customFs.existsSync(rootDir))) {
+    await customFs.mkdirSync(rootDir);
   }
 
   const lines = input.split("\n").filter((line) => line.trim().length > 0);
@@ -72,6 +149,17 @@ export function createStructureFromString(
 
       adjustStack(stack, level);
       const currentDir = stack[stack.length - 1];
+
+      // Apply name replacements if needed
+      let finalName = operation.name;
+      if (
+        (operation.type === "file" && replaceFileNames) ||
+        (operation.type === "directory" && replaceFolderNames)
+      ) {
+        finalName = finalName.replace(search, replace);
+      }
+      operation.name = finalName;
+
       const targetPath = path.join(currentDir, operation.name);
 
       if (verbose) {
@@ -81,7 +169,10 @@ export function createStructureFromString(
       }
 
       try {
-        const newPath = executeOperation(operation, targetPath, { verbose });
+        const newPath = await executeOperation(operation, targetPath, {
+          ...options,
+          fs: customFs,
+        });
         if (operation.type === "directory" && newPath) {
           stack.push(newPath);
         }
@@ -173,17 +264,17 @@ function parseOperation(line: string): FileOperation {
  * @param options Additional options for execution
  * @returns The path of the created directory for directory operations
  */
-function executeOperation(
+async function executeOperation(
   operation: FileOperation,
   targetPath: string,
   options: CreateOptions = {}
-): string | void {
-  const { verbose = false } = options;
+): Promise<string | void> {
+  const { verbose = false, fs: customFs = defaultFs } = options;
 
   try {
     const destinationDir = path.dirname(targetPath);
-    if (!fs.existsSync(destinationDir)) {
-      fs.mkdirSync(destinationDir, { recursive: true });
+    if (!(await customFs.existsSync(destinationDir))) {
+      await customFs.mkdirSync(destinationDir);
       if (verbose) {
         console.log(`📁 Created directory: ${destinationDir}`);
       }
@@ -191,27 +282,33 @@ function executeOperation(
 
     switch (operation.type) {
       case "file":
-        createEmptyFile(targetPath, { verbose });
+        await createEmptyFile(targetPath, { ...options, fs: customFs });
         break;
 
       case "directory":
-        createDirectory(targetPath, { verbose });
+        await createDirectory(targetPath, { ...options, fs: customFs });
         return targetPath;
 
       case "copy":
         if (!operation.sourcePath) {
-          createEmptyFile(targetPath, { verbose });
+          await createEmptyFile(targetPath, { ...options, fs: customFs });
           break;
         }
-        copyFile(operation.sourcePath, targetPath, { verbose });
+        await copyFile(operation.sourcePath, targetPath, {
+          ...options,
+          fs: customFs,
+        });
         break;
 
       case "move":
         if (!operation.sourcePath) {
-          createEmptyFile(targetPath, { verbose });
+          await createEmptyFile(targetPath, { ...options, fs: customFs });
           break;
         }
-        moveFile(operation.sourcePath, targetPath, { verbose });
+        await moveFile(operation.sourcePath, targetPath, {
+          ...options,
+          fs: customFs,
+        });
         break;
     }
   } catch (error: any) {
@@ -219,7 +316,7 @@ function executeOperation(
       `⚠️  Warning: Operation failed, creating empty file: ${error.message}`
     );
     try {
-      createEmptyFile(targetPath, { verbose });
+      await createEmptyFile(targetPath, { ...options, fs: customFs });
     } catch (err: any) {
       console.warn(`⚠️  Warning: Could not create empty file: ${err.message}`);
     }
@@ -232,15 +329,18 @@ function executeOperation(
  * @param filePath The path of the file to create
  * @param options Additional options
  */
-function createEmptyFile(filePath: string, options: CreateOptions = {}): void {
-  const { verbose = false } = options;
+async function createEmptyFile(
+  filePath: string,
+  options: CreateOptions = {}
+): Promise<void> {
+  const { verbose = false, fs: customFs = defaultFs } = options;
 
   const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  if (!(await customFs.existsSync(dir))) {
+    await customFs.mkdirSync(dir);
   }
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, "");
+  if (!(await customFs.existsSync(filePath))) {
+    await customFs.writeFileSync(filePath, "");
     if (verbose) {
       console.log(chalk.green(`📄 Created ${filePath}`));
     }
@@ -255,13 +355,16 @@ function createEmptyFile(filePath: string, options: CreateOptions = {}): void {
  * @param dirPath The path of the directory to create
  * @param options Additional options
  */
-function createDirectory(dirPath: string, options: CreateOptions = {}): void {
-  const { verbose = false } = options;
+async function createDirectory(
+  dirPath: string,
+  options: CreateOptions = {}
+): Promise<void> {
+  const { verbose = false, fs: customFs = defaultFs } = options;
 
-  if (!fs.existsSync(dirPath)) {
-    fs.mkdirSync(dirPath, { recursive: true });
+  if (!(await customFs.existsSync(dirPath))) {
+    await customFs.mkdirSync(dirPath);
     if (verbose) {
-      console.log(chalk.green(`📁 Created ${dirPath}`));
+      console.log(chalk.green(`📁 Created directory ${dirPath}`));
     }
   } else if (verbose) {
     console.log(chalk.yellow(`⚠️  Directory already exists: ${dirPath}`));
@@ -288,29 +391,29 @@ function resolveTildePath(filePath: string): string {
  * @param targetPath The target path to copy to
  * @param options Additional options
  */
-function copyFile(
+async function copyFile(
   sourcePath: string,
   targetPath: string,
   options: CreateOptions = {}
-): void {
-  const { verbose = false } = options;
+): Promise<void> {
+  const { verbose = false, fs: customFs = defaultFs } = options;
 
   const resolvedSource = path.isAbsolute(sourcePath)
     ? sourcePath
     : path.resolve(process.cwd(), sourcePath);
 
-  if (!fs.existsSync(resolvedSource)) {
+  if (!(await customFs.existsSync(resolvedSource))) {
     console.warn(
       chalk.yellow(
         `⚠️  Warning: Source not found "${sourcePath}", creating empty file`
       )
     );
-    createEmptyFile(targetPath, { verbose });
+    await createEmptyFile(targetPath, { ...options, fs: customFs });
     return;
   }
 
   try {
-    if (fs.statSync(resolvedSource).isDirectory()) {
+    if ((await customFs.statSync(resolvedSource)).isDirectory()) {
       if (verbose) {
         console.log(
           chalk.blue(
@@ -318,9 +421,12 @@ function copyFile(
           )
         );
       }
-      copyDirectorySync(resolvedSource, targetPath, { verbose });
+      await copyDirectorySync(resolvedSource, targetPath, {
+        ...options,
+        fs: customFs,
+      });
     } else {
-      fs.copyFileSync(resolvedSource, targetPath);
+      await customFs.copyFileSync(resolvedSource, targetPath);
       if (verbose) {
         console.log(chalk.green(`✅ Copied ${sourcePath} to ${targetPath}`));
       }
@@ -331,7 +437,7 @@ function copyFile(
         `⚠️  Warning: Failed to copy "${sourcePath}", creating empty file`
       )
     );
-    createEmptyFile(targetPath, { verbose });
+    await createEmptyFile(targetPath, { ...options, fs: customFs });
   }
 }
 
@@ -342,44 +448,44 @@ function copyFile(
  * @param targetPath The target path to move to
  * @param options Additional options
  */
-function moveFile(
+async function moveFile(
   sourcePath: string,
   targetPath: string,
   options: CreateOptions = {}
-): void {
-  const { verbose = false } = options;
+): Promise<void> {
+  const { verbose = false, fs: customFs = defaultFs } = options;
 
   const resolvedSource = path.isAbsolute(sourcePath)
     ? sourcePath
     : path.resolve(process.cwd(), sourcePath);
 
-  if (!fs.existsSync(resolvedSource)) {
+  if (!(await customFs.existsSync(resolvedSource))) {
     console.warn(
       chalk.yellow(
         `⚠️  Warning: Source not found "${sourcePath}", creating empty file`
       )
     );
-    createEmptyFile(targetPath, { verbose });
+    await createEmptyFile(targetPath, { ...options, fs: customFs });
     return;
   }
 
   // Create the destination directory if it doesn't exist
   const destinationDir = path.dirname(targetPath);
-  if (!fs.existsSync(destinationDir)) {
-    fs.mkdirSync(destinationDir, { recursive: true });
+  if (!(await customFs.existsSync(destinationDir))) {
+    await customFs.mkdirSync(destinationDir);
   }
 
   // Remove the destination if it exists
-  if (fs.existsSync(targetPath)) {
-    if (fs.statSync(targetPath).isDirectory()) {
-      fs.rmSync(targetPath, { recursive: true });
+  if (await customFs.existsSync(targetPath)) {
+    if ((await customFs.statSync(targetPath)).isDirectory()) {
+      await customFs.rmSync(targetPath, { recursive: true });
       if (verbose) {
         console.log(
           chalk.yellow(`⚠️  Replaced existing directory: ${targetPath}`)
         );
       }
     } else {
-      fs.unlinkSync(targetPath);
+      await customFs.unlinkSync(targetPath);
       if (verbose) {
         console.log(chalk.yellow(`⚠️  Replaced existing file: ${targetPath}`));
       }
@@ -387,7 +493,7 @@ function moveFile(
   }
 
   try {
-    if (fs.statSync(resolvedSource).isDirectory()) {
+    if ((await customFs.statSync(resolvedSource)).isDirectory()) {
       if (verbose) {
         console.log(
           chalk.blue(
@@ -395,8 +501,11 @@ function moveFile(
           )
         );
       }
-      copyDirectorySync(resolvedSource, targetPath, { verbose: false });
-      fs.rmSync(resolvedSource, { recursive: true });
+      await copyDirectorySync(resolvedSource, targetPath, {
+        ...options,
+        fs: customFs,
+      });
+      await customFs.rmSync(resolvedSource, { recursive: true });
       if (verbose) {
         console.log(chalk.green(`✅ Moved directory successfully`));
       }
@@ -407,10 +516,10 @@ function moveFile(
         );
       }
       try {
-        fs.renameSync(resolvedSource, targetPath);
+        await customFs.renameSync(resolvedSource, targetPath);
       } catch {
-        fs.copyFileSync(resolvedSource, targetPath);
-        fs.unlinkSync(resolvedSource);
+        await customFs.copyFileSync(resolvedSource, targetPath);
+        await customFs.unlinkSync(resolvedSource);
       }
       if (verbose) {
         console.log(chalk.green(`✅ Moved file successfully`));
@@ -422,7 +531,7 @@ function moveFile(
         `⚠️  Warning: Failed to move "${sourcePath}", creating empty file`
       )
     );
-    createEmptyFile(targetPath, { verbose });
+    await createEmptyFile(targetPath, { ...options, fs: customFs });
   }
 }
 
@@ -433,26 +542,29 @@ function moveFile(
  * @param destination The destination directory to copy to
  * @param options Additional options
  */
-function copyDirectorySync(
+async function copyDirectorySync(
   source: string,
   destination: string,
   options: CreateOptions = {}
-): void {
-  const { verbose = false } = options;
+): Promise<void> {
+  const { verbose = false, fs: customFs = defaultFs } = options;
 
-  if (!fs.existsSync(destination)) {
-    fs.mkdirSync(destination, { recursive: true });
+  if (!(await customFs.existsSync(destination))) {
+    await customFs.mkdirSync(destination);
   }
 
-  const entries = fs.readdirSync(source, { withFileTypes: true });
+  const entries = await customFs.readdirSync(source, { withFileTypes: true });
   for (const entry of entries) {
     const sourcePath = path.join(source, entry.name);
     const destPath = path.join(destination, entry.name);
 
     if (entry.isDirectory()) {
-      copyDirectorySync(sourcePath, destPath, { verbose });
+      await copyDirectorySync(sourcePath, destPath, {
+        ...options,
+        fs: customFs,
+      });
     } else {
-      fs.copyFileSync(sourcePath, destPath);
+      await customFs.copyFileSync(sourcePath, destPath);
       if (verbose) {
         console.log(chalk.green(`  ✓ ${entry.name}`));
       }
